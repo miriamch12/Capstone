@@ -273,10 +273,3 @@ adjusted_cox_struc <- split_data(table_limit_struc, "adjusted")
 #Run Cox Model on individual covariates
 unadjusted_cox_struc <- split_data(table_limit_struc, "unadjusted")
 ```
-
-```{r}
-comp_table <- adjusted_cox %>%
-  select(`3mo HR (CI)`)%>%
-  union(adjusted_cox_struc) %>%
-  select(`3mo HR (CI)`)
-```
