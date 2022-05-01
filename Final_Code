@@ -1,0 +1,282 @@
+---
+title: "Survival Analysis"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+library(survival)
+library(survminer)
+```
+
+#Survial Analysis Function
+```{r}
+split_data <- function(dataset, action){
+  out <- list()
+  full_out <- list()
+  n = 1
+  #Split data set into 3 parts: 
+  #(1) Start time - 3 months 
+  out$timevarying1 <- dataset %>%
+    mutate(
+      followup2 = pmin(follow_up_days, 91),
+      censor2 = ifelse(date_of_death > (mdx_date + duration(91, 'days')) | is.na(date_of_death), 0, 1)
+      )
+  #3 months - 4 years (follow up is 1461-91 = 1370)
+  out$timevarying2 <- dataset %>%
+      filter(follow_up_days > 91) %>%
+    mutate(
+      followup2 = pmin(follow_up_days - 91, 1370),
+      censor2 = ifelse(date_of_death > (mdx_date + duration(1461, 'days')) | is.na(date_of_death), 0, 1)
+      )
+  #4 years and after
+  out$timevarying3 <- dataset %>%
+    filter(follow_up_days > 1461) %>%
+    mutate(
+      followup2 = follow_up_days - 1461,
+      censor2 = ifelse(is.na(date_of_death), 0, 1)
+      )
+  
+  for (i in 1:length(out)){ #for each timevarying data set, create a table with
+    #HR and CI
+    if (action == "adjusted"){ #if to created adjusted model,
+      #run model
+      cox_reg_split <- coxph(Surv(followup2, censor2) ~ med_status + 
+                               rad  + race + ethnicity + age_cat + 
+                               encounter_density_months,
+                    data = out[[i]])
+      #Get important information from model summary and create a table
+      res <- summary(cox_reg_split)
+      cols <- lapply(c(7:8) , function(x) res[x])
+      tbl <- do.call(data.frame, cols)
+      tbl$hr_ci <- paste(round(tbl$coefficients.exp.coef., digits = 2), 
+                         " [95% CI: ", round(tbl$conf.int.lower..95, digits = 2),
+                         "-", round(tbl$conf.int.upper..95, digits = 2),
+                         "]; p = ",round(tbl$coefficients.Pr...z.., digits = 3) )
+      new_tbl <- tbl%>%
+        select(hr_ci)
+      
+      #create timevarying# table
+      nam <- paste("timevarying", i, sep = "")
+      full_out[[nam]] <- new_tbl
+    
+    }else if (action == "unadjusted"){ #if to make unadjusted model
+      covariates <- names(out[[i]])[c(2,4:7,12)]
+      model_list = list()
+      
+      for(variable in 1:length(covariates)){ #for every covariate
+        
+        #run model using covariate
+        formula_text <- paste0("Surv(followup2, censor2) ~ ",
+                               covariates[[variable]])
+        cox_reg_bin <- coxph(as.formula(formula_text), data = out[[i]])
+        
+        #create table from summary of covariate model
+        res <- summary(cox_reg_bin)
+        cols <- lapply(c(7:8) , function(x) res[x])
+        tbl <- do.call(data.frame, cols)
+        tbl$hr_ci <- paste(round(tbl$coefficients.exp.coef., digits = 2), 
+                           " [95% CI: ", round(tbl$conf.int.lower..95, digits = 2),
+                           "-", round(tbl$conf.int.upper..95, digits = 2),"]; p = ",round(tbl$coefficients.Pr...z.., digits = 3))
+        new_tbl <- tbl%>%
+          select(hr_ci)
+        
+        #add covariate model to model_list
+        nam <- paste("mod_", variable, sep = "")
+        model_list[[nam]] <- new_tbl
+      }
+      #combine the rows of all the covariate models
+      model_result <- bind_rows(model_list$mod_1, model_list$mod_2, 
+                            model_list$mod_3, model_list$mod_4,
+                            model_list$mod_5, model_list$mod_6)
+      
+      #put the combined covariate models into the timevarying# table
+      nam <- paste("timevarying", i, sep = "")
+      full_out[[nam]] <- model_result
+    }
+  }
+  #combine timevarying tables
+  analysis_result <- cbind(full_out$timevarying1, full_out$timevarying2, 
+                           full_out$timevarying3)
+  colnames(analysis_result) <- c("3mo HR (CI)", "3 mo – 4 yr HR (CI)",
+                                 "4yr+ HR (CI)")  
+return(analysis_result)
+}
+```
+
+#Analysis Set Up
+```{r }
+#Limit Dataset to important variables
+table_limit <- table1 %>%
+  select(chai_patient_id, med_status, follow_up_days, rad, encounter_density_months, race, ethnicity, age, dod, date_of_death, mdx_date )
+
+table_limit_struc <- table1_struc %>%
+  select(chai_patient_id, med_status, follow_up_days, rad, encounter_density_months, race, ethnicity, age, dod, date_of_death, mdx_date)
+
+
+#Histogram of followup month by medication status
+##Full Dataset
+ggplot(table_limit, aes(x=follow_up_days, fill=med_status, color=med_status)) + labs(title="Follow-Up Days Histogram Plot by Treatment Status",x="Follow-Up Days", y = "Count", color = "Treatment Status", fill = "Treatment Status")+
+  geom_histogram(position="identity", alpha=0.5)
+##Structured Dataset
+ggplot(table_limit_struc, aes(x=follow_up_days, fill=med_status, color=med_status)) +
+  geom_histogram(position="identity", alpha=0.5) + labs(title="Follow-Up Days Histogram Plot by Treatment Status",x="Follow-Up Days", y = "Count", color = "Treatment Status", fill = "Treatment Status")
+
+#Histogram of age  by medication status
+ggplot(table_limit, aes(x=age, fill=med_status, color=med_status)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(table_limit_struc, aes(x=age, fill=med_status, color=med_status)) +
+  geom_histogram(position="identity", alpha=0.5)
+
+
+table_limit <- table_limit %>%
+  mutate(age_cat = (case_when(
+      age < 40 ~ "18-39",
+      age < 60 ~ "40-59",
+      age < 75 ~ "60-74",
+      age > 74 ~ "75+",
+      TRUE ~ "Unknown"
+    )))
+
+table_limit_struc <- table_limit_struc %>%
+  mutate(age_cat = (case_when(
+      age < 40 ~ "18-39",
+      age < 60 ~ "40-59",
+      age < 75 ~ "60-74",
+      age > 74 ~ "75+",
+      TRUE ~ "Unknown"
+    )))
+
+```
+
+#Full Data Set Analysis
+```{r}
+#FULL DATA SET ANALYSIS
+
+
+#Create event for analysis
+table_limit$censored[table_limit$dod == "Yes"] <- 1
+table_limit$censored[table_limit$dod == "No"] <- 0
+
+
+#Kaplan-Meier Curve for medication status
+km_fit1 <- survfit(Surv(follow_up_days, censored) ~ med_status, 
+                   data = table_limit, 
+                   type="kaplan-meier")
+
+summary(km_fit1)
+print(km_fit1)
+
+#Probability of survival to 1 year
+summary(survfit(Surv(follow_up_days, censored) ~ med_status, 
+                   data = table_limit), times = 365.25)
+
+
+#Kaplan-Meier Curve for age category
+km_fit1_age <- survfit(Surv(follow_up_days, censored) ~ age_cat, 
+                   data = table_limit, 
+                   type="kaplan-meier")
+
+summary(km_fit1_age)
+print(km_fit1_age)
+
+##Plot the cumulative survival rates (probabilities) medication status
+
+#Complete Plot
+ggsurvplot(km_fit1, data = table_limit, risk.table = TRUE, conf.int = TRUE, pval = TRUE, pval.method = TRUE, ggtheme = theme_minimal(), xscale = 365.25, break.x.by = 3652.5, xlab = "Time in Years", legend.labs = c("Treated", "Untreated"))
+
+#Plot with 5 year cut-off
+ggsurvplot(km_fit1, data = table_limit, risk.table = TRUE, conf.int = TRUE, pval = TRUE, pval.method = TRUE, ggtheme = theme_minimal(), xscale = 365.25, xlim = c(0, 1826.25), break.x.by = 365.25, xlab = "Time in Years", legend.labs = c("Treated", "Untreated"))
+
+#Plot the cumulative survival rates (probabilities) age category
+ggsurvplot(km_fit1_age, data = table_limit, risk.table = TRUE, conf.int = TRUE, pval = TRUE, pval.method = TRUE, ggtheme = theme_minimal(), xscale = 365.25, xlim = c(0, 5475), break.x.by = 1826.25, xlab = "Time in Years", legend.labs = c("18-39 Years", "40-59 Years", "60-74 Years", "75 Years and Older"))
+
+#Age plot faceted by medication status
+ggsurvplot(km_fit1_age, data = table_limit, risk.table = TRUE, conf.int = TRUE, facet.by = "med_status", ggtheme = theme_minimal(), xscale = 365.25, xlim = c(0, 5475), break.x.by = 1826.25, xlab = "Time in Years", legend.labs = c("18-39 Years", "40-59 Years", "60-74 Years", "75 Years and Older"), facet.labs = c("Treated", "Untreated"))
+
+
+#Estimate Cox Proportional Hazards Model
+cox_reg1 <- coxph(Surv(follow_up_days, censored) ~ med_status  + rad + encounter_density_months + race + ethnicity + age_cat,
+                  data = table_limit)
+
+
+#Test Proportionality Assumption
+test_ph = cox.zph(cox_reg1)
+test_ph
+
+##Because Model is Non-Proportional, Split dataset into 3 and run analysis on each
+adjusted_cox <- split_data(table_limit, "adjusted")
+
+#Run Cox Model on individual covariates
+unadjusted_cox <- split_data(table_limit, "unadjusted")
+```
+
+#Structured-only Data set Analysis
+```{r}
+#STRUCTURED-ONLY DATA SET ANALYSIS
+
+
+#Create event for analysis
+table_limit_struc$censored[table_limit_struc$dod == "Yes"] <- 1
+table_limit_struc$censored[table_limit_struc$dod == "No"] <- 0
+
+
+#Kaplan-Meier Curve for medication status
+km_fit1_struc <- survfit(Surv(follow_up_days, censored) ~ med_status, 
+                   data = table_limit_struc, 
+                   type="kaplan-meier")
+
+summary(km_fit1_struc)
+print(km_fit1_struc)
+
+#Probability of survival to 1 year
+summary(survfit(Surv(follow_up_days, censored) ~ med_status, 
+                   data = table_limit_struc), times = 365.25)
+
+#Kaplan-Meier Curve for age category
+km_fit1_age_struc <- survfit(Surv(follow_up_days, censored) ~ age_cat, 
+                   data = table_limit_struc, 
+                   type="kaplan-meier")
+
+
+summary(km_fit1_age_struc)
+print(km_fit1_age_struc)
+
+##Plot the cumulative survival rates (probabilities) medication status
+
+#Complete Plot
+ggsurvplot(km_fit1_struc, data = table_limit, risk.table = TRUE, conf.int = TRUE, pval = TRUE, pval.method = TRUE, ggtheme = theme_minimal(), xscale = 365.25, break.x.by = 3652.5, xlab = "Time in Years", legend.labs = c("Treated", "Untreated"))
+
+#Plot with 5 year cut-off
+ggsurvplot(km_fit1_struc, data = table_limit, risk.table = TRUE, conf.int = TRUE, pval = TRUE, pval.method = TRUE, ggtheme = theme_minimal(), xscale = 365.25, xlim = c(0, 1826.25), break.x.by = 365.25, xlab = "Time in Years", legend.labs = c("Treated", "Untreated"))
+
+#Plot the cumulative survival rates (probabilities) age category
+ggsurvplot(km_fit1_age_struc, data = table_limit, risk.table = TRUE, conf.int = TRUE, pval = TRUE, pval.method = TRUE, ggtheme = theme_minimal(), xscale = 365.25, xlim = c(0, 5475), break.x.by = 1826.25, xlab = "Time in Years", legend.labs = c("18-39 Years", "40-59 Years", "60-74 Years", "75 Years and Older"))
+
+#Age plot faceted by medication status
+ggsurvplot(km_fit1_age_struc, data = table_limit_struc, risk.table = TRUE, conf.int = TRUE, facet.by = "med_status", ggtheme = theme_minimal(), xscale = 365.25, xlim = c(0, 5475), break.x.by = 1826.25, xlab = "Time in Years", legend.labs = c("18-39 Years", "40-59 Years", "60-74 Years", "75 Years and Older"))
+
+#Estimate Cox Proportional Hazards Model
+cox_reg1_struc <- coxph(Surv(follow_up_days, censored) ~ med_status  + rad + encounter_density_months + race + ethnicity + age_cat,
+                  data = table_limit_struc)
+
+summary(cox_reg1_struc)
+
+#Test Proportionality Assumption
+test_ph_struc = cox.zph(cox_reg1_struc)
+test_ph_struc
+
+##Because Model is Non-Proportional, Split dataset into 3 and run analysis on each
+adjusted_cox_struc <- split_data(table_limit_struc, "adjusted")
+
+#Run Cox Model on individual covariates
+unadjusted_cox_struc <- split_data(table_limit_struc, "unadjusted")
+```
+
+```{r}
+comp_table <- adjusted_cox %>%
+  select(`3mo HR (CI)`)%>%
+  union(adjusted_cox_struc) %>%
+  select(`3mo HR (CI)`)
+```
